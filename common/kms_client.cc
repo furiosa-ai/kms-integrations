@@ -67,6 +67,8 @@ absl::StatusOr<std::string> GetDigestString(const kms_v1::Digest& digest) {
       break;
     case kms_v1::Digest::kSha512:
       return digest.sha512();
+    case kms_v1::Digest::kExternalMu:
+      return digest.external_mu();
     default:
       return absl::InternalError(
           absl::StrFormat("at %s: could not get digest field of the request",
