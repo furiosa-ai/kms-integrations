@@ -49,6 +49,23 @@ cc_test(
 )
 
 cc_test(
+    name = "ml_dsa_external_mu_test",
+    size = "small",
+    srcs = ["ml_dsa_external_mu_test.cc"],
+    deps = [
+        ":bridge",
+        "//common:openssl",
+        "//common/test:test_status_macros",
+        "//kmsp11:cryptoki_headers",
+        "//kmsp11/test",
+        "//kmsp11/test:ml_dsa_fake_kms",
+        "@com_google_absl//absl/cleanup",
+        "@com_google_absl//absl/strings",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "asymmetric_crypt_test",
     size = "small",
     srcs = ["asymmetric_crypt_test.cc"],

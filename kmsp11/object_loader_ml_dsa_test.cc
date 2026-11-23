@@ -48,6 +48,8 @@ class ObjectLoaderMlDsaTest : public testing::Test {
   std::unique_ptr<KmsClient> client_;
 };
 
+// Both the PQ_SIGN_ML_DSA_* and the PQ_SIGN_ML_DSA_*_EXTERNAL_MU keys load as
+// CKK_ML_DSA keys.
 TEST_F(ObjectLoaderMlDsaTest, LoadsMlDsaKeysWithNistPqcPublicKeys) {
   ASSERT_OK_AND_ASSIGN(
       kms_v1::CryptoKeyVersion ckv44,
@@ -61,13 +63,25 @@ TEST_F(ObjectLoaderMlDsaTest, LoadsMlDsaKeysWithNistPqcPublicKeys) {
       kms_v1::CryptoKeyVersion ckv87,
       fake_->CreateKey(kKeyRing, "k87",
                        kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_87));
+  ASSERT_OK_AND_ASSIGN(
+      kms_v1::CryptoKeyVersion ckv44mu,
+      fake_->CreateKey(kKeyRing, "k44mu",
+                       kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_44_EXTERNAL_MU));
+  ASSERT_OK_AND_ASSIGN(
+      kms_v1::CryptoKeyVersion ckv65mu,
+      fake_->CreateKey(kKeyRing, "k65mu",
+                       kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_65_EXTERNAL_MU));
+  ASSERT_OK_AND_ASSIGN(
+      kms_v1::CryptoKeyVersion ckv87mu,
+      fake_->CreateKey(kKeyRing, "k87mu",
+                       kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_87_EXTERNAL_MU));
 
   // generate_certs is enabled to ensure it is skipped for ML-DSA keys rather
   // than causing a failure.
   ASSERT_OK_AND_ASSIGN(std::unique_ptr<ObjectLoader> loader,
                        ObjectLoader::New(kKeyRing, {}, true));
   ASSERT_OK_AND_ASSIGN(ObjectStoreState state, loader->BuildState(*client_));
-  ASSERT_EQ(state.keys_size(), 3);
+  ASSERT_EQ(state.keys_size(), 6);
 
   for (const Key& key : state.keys()) {
     EXPECT_FALSE(key.has_certificate());
