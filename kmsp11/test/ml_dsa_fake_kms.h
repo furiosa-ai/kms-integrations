@@ -30,7 +30,9 @@ namespace cloud_kms::kmsp11 {
 // The Go fakekms server is built against a Cloud KMS client library that
 // predates post-quantum algorithms, so this C++ fake is used to exercise the
 // ML-DSA code paths. It implements ListCryptoKeys, ListCryptoKeyVersions,
-// GetPublicKey (NIST_PQC format only) and AsymmetricSign (data only).
+// GetPublicKey (NIST_PQC format only) and AsymmetricSign. AsymmetricSign
+// requires data for PQ_SIGN_ML_DSA_* keys, and a 64-byte digest.external_mu
+// for PQ_SIGN_ML_DSA_*_EXTERNAL_MU keys.
 //
 // The fake signs with BoringSSL's ML-DSA implementation, so New() returns
 // kUnimplemented when built against a crypto library without ML-DSA.
@@ -49,6 +51,10 @@ class MlDsaFakeKms {
 
   // Returns the number of AsymmetricSign calls served.
   virtual int sign_count() const = 0;
+
+  // Returns the number of AsymmetricSign calls served that signed an external
+  // mu.
+  virtual int external_mu_sign_count() const = 0;
 
   // Causes AsymmetricSign to return a corrupted signature, for testing.
   virtual void set_corrupt_signatures(bool corrupt) = 0;
