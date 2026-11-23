@@ -348,7 +348,7 @@ Compatibility                 | Compatible With
 PKCS #11 Function             | [`C_GenerateKeyPair`][C_GenerateKeyPair]
 PKCS #11 Mechanism            | [`CKM_ML_DSA_KEY_PAIR_GEN`][pkcs11-v3.2-ml-dsa] (PKCS #11 v3.2)
 PKCS #11 Mechanism Parameters | None
-Cloud KMS Algorithm           | [`PQ_SIGN_ML_DSA_44`][kms-pqc-algorithms], [`PQ_SIGN_ML_DSA_65`][kms-pqc-algorithms], [`PQ_SIGN_ML_DSA_87`][kms-pqc-algorithms]
+Cloud KMS Algorithm           | [`PQ_SIGN_ML_DSA_44`][kms-pqc-algorithms], [`PQ_SIGN_ML_DSA_65`][kms-pqc-algorithms], [`PQ_SIGN_ML_DSA_87`][kms-pqc-algorithms], [`PQ_SIGN_ML_DSA_44_EXTERNAL_MU`][kms-pqc-algorithms], [`PQ_SIGN_ML_DSA_65_EXTERNAL_MU`][kms-pqc-algorithms], [`PQ_SIGN_ML_DSA_87_EXTERNAL_MU`][kms-pqc-algorithms]
 
 ### ML-DSA Signing and Verification
 
@@ -365,13 +365,53 @@ public key in `CKA_VALUE` and an RFC 9881 SubjectPublicKeyInfo in
 `CKA_PUBLIC_KEY_INFO`.
 
 Signing is performed by Cloud KMS, which produces hedged (randomized)
-signatures over an empty context string. Consequently:
+signatures. A `CK_SIGN_ADDITIONAL_CONTEXT` parameter is optional; when
+signing, `hedgeVariant` must be `CKH_HEDGE_PREFERRED` or `CKH_HEDGE_REQUIRED`.
 
-*   A `CK_SIGN_ADDITIONAL_CONTEXT` parameter is optional. When signing,
-    `hedgeVariant` must be `CKH_HEDGE_PREFERRED` or `CKH_HEDGE_REQUIRED`, and
-    `ulContextLen` must be zero.
-*   Messages may not exceed 64 KiB, including the total of all
-    `C_SignUpdate` parts.
+The Cloud KMS `AsymmetricSign` API has no parameter for an ML-DSA context
+string, for any ML-DSA algorithm. Whether the library can still honor a
+context string depends on the key's Cloud KMS algorithm, which is available in
+the `CKA_KMS_ALGORITHM` attribute:
+
+*   `PQ_SIGN_ML_DSA_44`, `PQ_SIGN_ML_DSA_65` and `PQ_SIGN_ML_DSA_87`: the
+    library sends the message to Cloud KMS, which signs it with an empty
+    context string. A non-empty context cannot be applied, so `ulContextLen`
+    must be zero; otherwise `C_SignInit` returns
+    `CKR_MECHANISM_PARAM_INVALID`. Messages may not exceed 64 KiB, including
+    the total of all `C_SignUpdate` parts.
+*   `PQ_SIGN_ML_DSA_44_EXTERNAL_MU`, `PQ_SIGN_ML_DSA_65_EXTERNAL_MU` and
+    `PQ_SIGN_ML_DSA_87_EXTERNAL_MU`: Cloud KMS does not take a context string
+    or a message for these keys either; it signs a 64-byte FIPS 204 message
+    representative mu supplied by the caller. The library computes mu locally
+    from the public key, the context string (up to 255 bytes, possibly empty)
+    and the message, so the context is applied by the library, not by Cloud
+    KMS. The resulting signature is a standard ML-DSA signature over the
+    message with that context string, and verifies with any FIPS 204
+    implementation. Messages are not limited in length. Computing mu requires
+    the library to be built with the default BoringSSL; other builds return
+    `CKR_MECHANISM_INVALID`.
+
+For example, to sign a message with a context string using an external mu key:
+
+```c
+CK_SIGN_ADDITIONAL_CONTEXT params = {CKH_HEDGE_PREFERRED, context, context_len};
+CK_MECHANISM mechanism = {CKM_ML_DSA, &params, sizeof(params)};
+C_SignInit(session, &mechanism, private_key);
+C_Sign(session, message, message_len, signature, &signature_len);
+```
+
+Cloud KMS does not accept a caller-supplied context string; `PQ_SIGN_ML_DSA_*`
+keys always sign with an empty one. External mu keys are therefore required
+whenever a context string is needed. For example, composite ML-DSA (RFC 10073)
+signs the ML-DSA component with a per-algorithm label as the context string
+(such as `COMPSIG-MLDSA87-RSA3072-PSS-SHA512`), so the ML-DSA component key
+must use `PQ_SIGN_ML_DSA_87_EXTERNAL_MU`. The library sends mu in the
+`digest.external_mu` field of the Cloud KMS
+[`AsymmetricSign`][kms-asymmetric-sign] request.
+
+With OpenSSL 3.5 or later and pkcs11-provider, set the `context-string`
+signature parameter; pkcs11-provider passes it to the library in
+`CK_SIGN_ADDITIONAL_CONTEXT`.
 
 Verification is performed locally, and requires the library to be built with
 the default BoringSSL. Builds that use FIPS BoringSSL or OpenSSL support ML-DSA
@@ -386,7 +426,7 @@ Compatibility                | Compatible With
 PKCS #11 Functions           | [`C_Sign`][C_Sign], [`C_Verify`][C_Verify], [`C_SignUpdate`][C_SignUpdate], [`C_SignFinal`][C_SignFinal], [`C_VerifyUpdate`][C_VerifyUpdate], [`C_VerifyFinal`][C_VerifyFinal]
 PKCS #11 Mechanism           | [`CKM_ML_DSA`][pkcs11-v3.2-ml-dsa] (PKCS #11 v3.2)
 PKCS #11 Mechanism Parameter | Optional `CK_SIGN_ADDITIONAL_CONTEXT`
-Cloud KMS Algorithm          | [`PQ_SIGN_ML_DSA_44`][kms-pqc-algorithms], [`PQ_SIGN_ML_DSA_65`][kms-pqc-algorithms], [`PQ_SIGN_ML_DSA_87`][kms-pqc-algorithms]
+Cloud KMS Algorithm          | [`PQ_SIGN_ML_DSA_44`][kms-pqc-algorithms], [`PQ_SIGN_ML_DSA_65`][kms-pqc-algorithms], [`PQ_SIGN_ML_DSA_87`][kms-pqc-algorithms], [`PQ_SIGN_ML_DSA_44_EXTERNAL_MU`][kms-pqc-algorithms], [`PQ_SIGN_ML_DSA_65_EXTERNAL_MU`][kms-pqc-algorithms], [`PQ_SIGN_ML_DSA_87_EXTERNAL_MU`][kms-pqc-algorithms]
 
 ### Generic Secret Key Generation
 
@@ -596,6 +636,7 @@ operations to fit in the current APIs exposed by Cloud KMS.
 [CKM_GENERIC_SECRET_KEY_GEN]: http://docs.oasis-open.org/pkcs11/pkcs11-curr/v2.40/cs01/pkcs11-curr-v2.40-cs01.html#_Toc228894689
 [pkcs11-v3.2-ml-dsa]: https://github.com/oasis-tcs/pkcs11/blob/master/working/doc/spec/ml_dsa.md
 [kms-pqc-algorithms]: https://cloud.google.com/kms/docs/algorithms#pqc_algorithms
+[kms-asymmetric-sign]: https://cloud.google.com/kms/docs/reference/rest/v1/projects.locations.keyRings.cryptoKeys.cryptoKeyVersions/asymmetricSign
 [CKM_RSA_PKCS]: http://docs.oasis-open.org/pkcs11/pkcs11-curr/v2.40/errata01/os/pkcs11-curr-v2.40-errata01-os-complete.html#_Toc228894635
 [CKM_RSA_PKCS_KEY_PAIR_GEN]: http://docs.oasis-open.org/pkcs11/pkcs11-curr/v2.40/errata01/os/pkcs11-curr-v2.40-errata01-os-complete.html#_Toc228894633
 [CKM_RSA_PKCS_OAEP]: http://docs.oasis-open.org/pkcs11/pkcs11-curr/v2.40/errata01/os/pkcs11-curr-v2.40-errata01-os-complete.html#_Toc228894637

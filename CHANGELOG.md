@@ -15,6 +15,12 @@
     `CKM_ML_DSA_KEY_PAIR_GEN`. Signing is performed by Cloud KMS; verification
     is local and requires a BoringSSL (non-FIPS) build. See the
     [user guide][user-guide] to learn more.
+*   Add support for ML-DSA context strings (`CK_SIGN_ADDITIONAL_CONTEXT`) with
+    Cloud KMS algorithms `PQ_SIGN_ML_DSA_44_EXTERNAL_MU`,
+    `PQ_SIGN_ML_DSA_65_EXTERNAL_MU` and `PQ_SIGN_ML_DSA_87_EXTERNAL_MU`. The
+    library computes the FIPS 204 message representative mu, which Cloud KMS
+    signs; messages to these keys are not limited to 64 KiB. Requires a
+    BoringSSL (non-FIPS) build.
 *   Updated deps:
     *   BoringSSL => 0.20251110.0
     *   googleapis => 984d83793d5b3461ffdefe4fc81e0112cb6c94fb
