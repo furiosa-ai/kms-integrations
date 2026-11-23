@@ -60,7 +60,9 @@ cc_test(
         ":ml_dsa",
         "//common:openssl",
         "//common/test:test_status_macros",
+        "//kmsp11:cryptoki_headers",
         "//kmsp11/test",
+        "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest_main",
     ],
 )

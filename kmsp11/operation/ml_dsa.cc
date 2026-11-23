@@ -176,6 +176,94 @@ class MlDsaSigner : public SignerInterface {
   std::string buffer_;
 };
 
+// Signs with a PQ_SIGN_ML_DSA_*_EXTERNAL_MU key. Cloud KMS signs a message
+// representative mu, which is computed here from the message and the context
+// string. The result is an ML-DSA.Sign (FIPS 204, Algorithm 2) signature over
+// the message with that context string. Since only mu is sent to Cloud KMS,
+// the message is streamed into mu rather than buffered, and its length is not
+// limited.
+class MlDsaExternalMuSigner : public SignerInterface {
+ public:
+  MlDsaExternalMuSigner(std::shared_ptr<Object> object,
+                        std::unique_ptr<MlDsaMuBuilder> mu_builder,
+                        size_t signature_length)
+      : object_(object),
+        mu_builder_(std::move(mu_builder)),
+        signature_length_(signature_length) {}
+
+  size_t signature_length() override { return signature_length_; }
+  Object* object() override { return object_.get(); }
+
+  absl::Status Sign(KmsClient* client, absl::Span<const uint8_t> data,
+                    absl::Span<uint8_t> signature) override {
+    if (multipart_started_) {
+      return FailedPreconditionError(
+          "Sign cannot be used to terminate a multi-part signing operation",
+          CKR_FUNCTION_FAILED, SOURCE_LOCATION);
+    }
+    mu_builder_->Update(data);
+    return SignMu(client, signature);
+  }
+
+  absl::Status SignUpdate(KmsClient* client,
+                          absl::Span<const uint8_t> data) override {
+    multipart_started_ = true;
+    mu_builder_->Update(data);
+    return absl::OkStatus();
+  }
+
+  absl::Status SignFinal(KmsClient* client,
+                         absl::Span<uint8_t> signature) override {
+    if (!multipart_started_) {
+      return FailedPreconditionError(
+          "SignUpdate needs to be called prior to terminating a multi-part "
+          "signing operation",
+          CKR_FUNCTION_FAILED, SOURCE_LOCATION);
+    }
+    return SignMu(client, signature);
+  }
+
+ private:
+  absl::Status SignMu(KmsClient* client, absl::Span<uint8_t> signature) {
+    if (signature.size() != signature_length_) {
+      return NewInternalError(
+          absl::StrFormat(
+              "provided signature buffer has incorrect size (got %d, want %d)",
+              signature.size(), signature_length_),
+          SOURCE_LOCATION);
+    }
+    // mu may only be finalized once; the session ends the operation after a
+    // signature is produced or a call fails.
+    if (mu_finalized_) {
+      return FailedPreconditionError("the signing operation has completed",
+                                     CKR_FUNCTION_FAILED, SOURCE_LOCATION);
+    }
+    mu_finalized_ = true;
+
+    kms_v1::AsymmetricSignRequest req;
+    req.set_name(std::string(object_->kms_key_name()));
+    req.mutable_digest()->set_external_mu(mu_builder_->Finalize());
+
+    ASSIGN_OR_RETURN(kms_v1::AsymmetricSignResponse resp,
+                     client->AsymmetricSign(req));
+    if (resp.signature().size() != signature_length_) {
+      return NewInternalError(
+          absl::StrFormat("unexpected signature length (got %d, want %d)",
+                          resp.signature().size(), signature_length_),
+          SOURCE_LOCATION);
+    }
+    std::copy(resp.signature().begin(), resp.signature().end(),
+              signature.begin());
+    return absl::OkStatus();
+  }
+
+  std::shared_ptr<Object> object_;
+  std::unique_ptr<MlDsaMuBuilder> mu_builder_;
+  size_t signature_length_;
+  bool multipart_started_ = false;
+  bool mu_finalized_ = false;
+};
+
 class MlDsaVerifier : public VerifierInterface {
  public:
   MlDsaVerifier(std::shared_ptr<Object> object, MlDsaPublicKey public_key,
@@ -234,20 +322,34 @@ absl::StatusOr<std::unique_ptr<SignerInterface>> NewMlDsaSigner(
   ASSIGN_OR_RETURN(MlDsaMechanismParams params,
                    ParseMechanismParams(mechanism));
 
-  // Cloud KMS always produces hedged signatures over an empty context.
+  // Cloud KMS always produces hedged signatures.
   if (params.hedge_variant == CKH_DETERMINISTIC_REQUIRED) {
     return InvalidMechanismParamError(
         "Cloud KMS does not support deterministic ML-DSA signing",
         SOURCE_LOCATION);
   }
-  if (!params.context.empty()) {
-    return InvalidMechanismParamError(
-        "Cloud KMS does not support ML-DSA signing with a context string",
-        SOURCE_LOCATION);
-  }
 
   ASSIGN_OR_RETURN(MlDsaPublicKey public_key, PublicKeyFromObject(*key));
   ASSIGN_OR_RETURN(MlDsaSizes sizes, GetMlDsaSizes(public_key.parameter_set));
+
+  if (IsMlDsaExternalMuAlgorithm(key->algorithm().algorithm)) {
+    // The library computes mu, which binds the context string, so any context
+    // is supported.
+    ASSIGN_OR_RETURN(
+        std::unique_ptr<MlDsaMuBuilder> mu_builder,
+        MlDsaMuBuilder::New(public_key, AsSpan(params.context)));
+    return std::unique_ptr<SignerInterface>(new MlDsaExternalMuSigner(
+        key, std::move(mu_builder), sizes.signature_bytes));
+  }
+
+  // For other ML-DSA keys, Cloud KMS signs the message itself, always with an
+  // empty context.
+  if (!params.context.empty()) {
+    return InvalidMechanismParamError(
+        "Cloud KMS does not support ML-DSA signing with a context string for "
+        "this key; use a PQ_SIGN_ML_DSA_*_EXTERNAL_MU key",
+        SOURCE_LOCATION);
+  }
   return std::unique_ptr<SignerInterface>(
       new MlDsaSigner(key, sizes.signature_bytes));
 }

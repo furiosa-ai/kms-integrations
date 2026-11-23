@@ -141,10 +141,13 @@ absl::StatusOr<CK_ML_DSA_PARAMETER_SET_TYPE> MlDsaParameterSetForAlgorithm(
     kms_v1::CryptoKeyVersion::CryptoKeyVersionAlgorithm algorithm) {
   switch (algorithm) {
     case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_44:
+    case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_44_EXTERNAL_MU:
       return CKP_ML_DSA_44;
     case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_65:
+    case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_65_EXTERNAL_MU:
       return CKP_ML_DSA_65;
     case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_87:
+    case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_87_EXTERNAL_MU:
       return CKP_ML_DSA_87;
     default:
       return NewInternalError(
@@ -156,6 +159,18 @@ absl::StatusOr<CK_ML_DSA_PARAMETER_SET_TYPE> MlDsaParameterSetForAlgorithm(
 bool IsMlDsaAlgorithm(
     kms_v1::CryptoKeyVersion::CryptoKeyVersionAlgorithm algorithm) {
   return MlDsaParameterSetForAlgorithm(algorithm).ok();
+}
+
+bool IsMlDsaExternalMuAlgorithm(
+    kms_v1::CryptoKeyVersion::CryptoKeyVersionAlgorithm algorithm) {
+  switch (algorithm) {
+    case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_44_EXTERNAL_MU:
+    case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_65_EXTERNAL_MU:
+    case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_87_EXTERNAL_MU:
+      return true;
+    default:
+      return false;
+  }
 }
 
 absl::StatusOr<std::string> MarshalMlDsaPublicKeyDer(
@@ -251,8 +266,58 @@ bool MlDsaVerificationSupported() {
 #endif
 }
 
+bool MlDsaExternalMuSupported() {
+#ifdef KMSP11_HAVE_MLDSA
+  return true;
+#else
+  return false;
+#endif
+}
+
 #ifdef KMSP11_HAVE_MLDSA
 namespace {
+
+template <typename PublicKey, typename Prehash, auto ParseFn, auto InitFn,
+          auto UpdateFn, auto FinalizeFn>
+class MlDsaMuBuilderImpl : public MlDsaMuBuilder {
+ public:
+  static absl::StatusOr<std::unique_ptr<MlDsaMuBuilder>> New(
+      const MlDsaPublicKey& public_key, absl::Span<const uint8_t> context) {
+    auto pub = std::make_unique<PublicKey>();
+    CBS cbs;
+    CBS_init(&cbs, reinterpret_cast<const uint8_t*>(public_key.value.data()),
+             public_key.value.size());
+    if (ParseFn(pub.get(), &cbs) != 1 || CBS_len(&cbs) != 0) {
+      return NewInternalError("error parsing ML-DSA public key",
+                              SOURCE_LOCATION);
+    }
+    auto builder = std::unique_ptr<MlDsaMuBuilderImpl>(new MlDsaMuBuilderImpl);
+    // tr = SHAKE256(pk, 64) is computed from the parsed public key, and the
+    // context string is absorbed with its domain separator and length prefix.
+    if (InitFn(&builder->state_, pub.get(), context.data(), context.size()) !=
+        1) {
+      return InvalidMechanismParamError(
+          "ML-DSA context strings may not exceed 255 bytes", SOURCE_LOCATION);
+    }
+    return std::unique_ptr<MlDsaMuBuilder>(std::move(builder));
+  }
+
+  void Update(absl::Span<const uint8_t> data) override {
+    UpdateFn(&state_, data.data(), data.size());
+  }
+
+  std::string Finalize() override {
+    std::string mu(MLDSA_MU_BYTES, '\0');
+    FinalizeFn(reinterpret_cast<uint8_t*>(mu.data()), &state_);
+    return mu;
+  }
+
+ private:
+  MlDsaMuBuilderImpl() = default;
+  Prehash state_;
+};
+
+static_assert(MLDSA_MU_BYTES == kMlDsaMuBytes);
 
 template <typename PublicKey, auto ParseFn, auto VerifyFn>
 absl::Status VerifyWith(const MlDsaPublicKey& public_key,
@@ -277,6 +342,42 @@ absl::Status VerifyWith(const MlDsaPublicKey& public_key,
 
 }  // namespace
 #endif
+
+absl::StatusOr<std::unique_ptr<MlDsaMuBuilder>> MlDsaMuBuilder::New(
+    const MlDsaPublicKey& public_key, absl::Span<const uint8_t> context) {
+  // FIPS 204 limits the context string to 255 bytes.
+  if (context.size() > 255) {
+    return InvalidMechanismParamError(
+        "ML-DSA context strings may not exceed 255 bytes", SOURCE_LOCATION);
+  }
+
+#ifdef KMSP11_HAVE_MLDSA
+  switch (public_key.parameter_set) {
+    case CKP_ML_DSA_44:
+      return MlDsaMuBuilderImpl<
+          MLDSA44_public_key, MLDSA44_prehash, MLDSA44_parse_public_key,
+          MLDSA44_prehash_init, MLDSA44_prehash_update,
+          MLDSA44_prehash_finalize>::New(public_key, context);
+    case CKP_ML_DSA_65:
+      return MlDsaMuBuilderImpl<
+          MLDSA65_public_key, MLDSA65_prehash, MLDSA65_parse_public_key,
+          MLDSA65_prehash_init, MLDSA65_prehash_update,
+          MLDSA65_prehash_finalize>::New(public_key, context);
+    case CKP_ML_DSA_87:
+      return MlDsaMuBuilderImpl<
+          MLDSA87_public_key, MLDSA87_prehash, MLDSA87_parse_public_key,
+          MLDSA87_prehash_init, MLDSA87_prehash_update,
+          MLDSA87_prehash_finalize>::New(public_key, context);
+    default:
+      return NewInternalError("unknown ML-DSA parameter set", SOURCE_LOCATION);
+  }
+#else
+  return NewError(absl::StatusCode::kUnimplemented,
+                  "computing the ML-DSA message representative is not "
+                  "supported by the crypto library this module was built with",
+                  CKR_MECHANISM_INVALID, SOURCE_LOCATION);
+#endif
+}
 
 absl::Status MlDsaVerify(const MlDsaPublicKey& public_key,
                          absl::Span<const uint8_t> data,

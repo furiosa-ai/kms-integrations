@@ -40,6 +40,12 @@ extern "C" {
 #define KMS_ALGORITHM_PQ_SIGN_ML_DSA_65 56UL
 // ML-DSA-87 (FIPS 204), randomized signing over the full message.
 #define KMS_ALGORITHM_PQ_SIGN_ML_DSA_87 69UL
+// ML-DSA-44 (FIPS 204), randomized signing over a message representative.
+#define KMS_ALGORITHM_PQ_SIGN_ML_DSA_44_EXTERNAL_MU 70UL
+// ML-DSA-65 (FIPS 204), randomized signing over a message representative.
+#define KMS_ALGORITHM_PQ_SIGN_ML_DSA_65_EXTERNAL_MU 67UL
+// ML-DSA-87 (FIPS 204), randomized signing over a message representative.
+#define KMS_ALGORITHM_PQ_SIGN_ML_DSA_87_EXTERNAL_MU 71UL
 
 // RSAES-OAEP with a 2048 bit key and a SHA256 digest.
 #define KMS_ALGORITHM_RSA_DECRYPT_OAEP_2048_SHA256 8UL
