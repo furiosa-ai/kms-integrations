@@ -72,6 +72,18 @@ std::string Sign(const KeyMaterial& key, std::string_view data) {
   return sig;
 }
 
+template <typename PrivateKey, size_t kSignatureBytes, auto FromSeedFn,
+          auto SignFn>
+std::string SignMu(const KeyMaterial& key, std::string_view mu) {
+  auto priv = std::make_unique<PrivateKey>();
+  FromSeedFn(priv.get(), reinterpret_cast<const uint8_t*>(key.seed.data()),
+             key.seed.size());
+  std::string sig(kSignatureBytes, '\0');
+  SignFn(reinterpret_cast<uint8_t*>(sig.data()), priv.get(),
+         reinterpret_cast<const uint8_t*>(mu.data()));
+  return sig;
+}
+
 class Service final : public kms_v1::KeyManagementService::Service {
  public:
   absl::StatusOr<kms_v1::CryptoKeyVersion> CreateKey(
@@ -80,14 +92,17 @@ class Service final : public kms_v1::KeyManagementService::Service {
     KeyMaterial material;
     switch (algorithm) {
       case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_44:
+      case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_44_EXTERNAL_MU:
         material = Generate<MLDSA44_private_key, MLDSA44_PUBLIC_KEY_BYTES,
                             MLDSA44_generate_key>(algorithm);
         break;
       case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_65:
+      case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_65_EXTERNAL_MU:
         material = Generate<MLDSA65_private_key, MLDSA65_PUBLIC_KEY_BYTES,
                             MLDSA65_generate_key>(algorithm);
         break;
       case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_87:
+      case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_87_EXTERNAL_MU:
         material = Generate<MLDSA87_private_key, MLDSA87_PUBLIC_KEY_BYTES,
                             MLDSA87_generate_key>(algorithm);
         break;
@@ -175,18 +190,66 @@ class Service final : public kms_v1::KeyManagementService::Service {
       }
       key = it->second;
     }
-    if (req->has_digest()) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
-                          "ML-DSA keys require data, not a digest");
-    }
-    if (req->has_data_crc32c() &&
-        req->data_crc32c().value() != Crc32c(req->data())) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
-                          "data_crc32c mismatch");
+    std::string sig;
+    bool verified_crc32c = false;
+    switch (key.algorithm) {
+      case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_44_EXTERNAL_MU:
+      case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_65_EXTERNAL_MU:
+      case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_87_EXTERNAL_MU: {
+        // External mu keys sign a 64-byte message representative.
+        if (!req->data().empty() || !req->has_digest() ||
+            req->digest().digest_case() != kms_v1::Digest::kExternalMu) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                              "external mu keys require digest.external_mu");
+        }
+        const std::string& mu = req->digest().external_mu();
+        if (mu.size() != MLDSA_MU_BYTES) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                              "external_mu must be 64 bytes");
+        }
+        if (req->has_digest_crc32c()) {
+          if (req->digest_crc32c().value() != Crc32c(mu)) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                "digest_crc32c mismatch");
+          }
+          verified_crc32c = true;
+        }
+        external_mu_sign_count_++;
+        break;
+      }
+      default:
+        if (req->has_digest()) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                              "ML-DSA keys require data, not a digest");
+        }
+        if (req->has_data_crc32c()) {
+          if (req->data_crc32c().value() != Crc32c(req->data())) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                "data_crc32c mismatch");
+          }
+          verified_crc32c = true;
+        }
     }
 
-    std::string sig;
     switch (key.algorithm) {
+      case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_44_EXTERNAL_MU:
+        sig = SignMu<MLDSA44_private_key, MLDSA44_SIGNATURE_BYTES,
+                     MLDSA44_private_key_from_seed,
+                     MLDSA44_sign_message_representative>(
+            key, req->digest().external_mu());
+        break;
+      case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_65_EXTERNAL_MU:
+        sig = SignMu<MLDSA65_private_key, MLDSA65_SIGNATURE_BYTES,
+                     MLDSA65_private_key_from_seed,
+                     MLDSA65_sign_message_representative>(
+            key, req->digest().external_mu());
+        break;
+      case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_87_EXTERNAL_MU:
+        sig = SignMu<MLDSA87_private_key, MLDSA87_SIGNATURE_BYTES,
+                     MLDSA87_private_key_from_seed,
+                     MLDSA87_sign_message_representative>(
+            key, req->digest().external_mu());
+        break;
       case kms_v1::CryptoKeyVersion::PQ_SIGN_ML_DSA_44:
         sig = Sign<MLDSA44_private_key, MLDSA44_SIGNATURE_BYTES,
                    MLDSA44_private_key_from_seed, MLDSA44_sign>(key,
@@ -213,12 +276,17 @@ class Service final : public kms_v1::KeyManagementService::Service {
     resp->set_name(req->name());
     resp->set_signature(sig);
     resp->mutable_signature_crc32c()->set_value(Crc32c(sig));
-    resp->set_verified_data_crc32c(req->has_data_crc32c());
+    if (req->has_digest()) {
+      resp->set_verified_digest_crc32c(verified_crc32c);
+    } else {
+      resp->set_verified_data_crc32c(verified_crc32c);
+    }
     resp->set_protection_level(kms_v1::ProtectionLevel::HSM);
     return grpc::Status::OK;
   }
 
   std::atomic<int> sign_count_ = 0;
+  std::atomic<int> external_mu_sign_count_ = 0;
   std::atomic<bool> corrupt_signatures_ = false;
 
  private:
@@ -259,6 +327,10 @@ class MlDsaFakeKmsImpl : public MlDsaFakeKms {
   }
 
   int sign_count() const override { return service_.sign_count_; }
+
+  int external_mu_sign_count() const override {
+    return service_.external_mu_sign_count_;
+  }
 
   void set_corrupt_signatures(bool corrupt) override {
     service_.corrupt_signatures_ = corrupt;
